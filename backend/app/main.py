@@ -11,6 +11,7 @@ ACTIVE_CLIENTS = []
 SIM_RUNNING = True
 current_price = 100.0
 ticks_history = []
+event_loop = None
 
 class GridConfig(BaseModel):
     lowerPrice: float = 95
@@ -28,31 +29,41 @@ def simulate_market():
         price += random.gauss(drift, 0.3)
         price = max(80, min(130, price))
         current_price = price
+        # Keep all fields in one snapshot derived from the same best bid/ask.
+        best_bid = round(price - random.uniform(0.01, 0.05), 2)
+        best_ask = round(best_bid + random.uniform(0.02, 0.10), 2)
         tick = {
             "time": time.strftime("%H:%M:%S"),
             "price": round(price, 2),
-            "bid": round(price - random.uniform(0.01, 0.05), 2),
-            "ask": round(price + random.uniform(0.01, 0.05), 2),
+            "bid": best_bid,
+            "ask": best_ask,
             "volume": random.randint(100, 5000)
         }
         ticks_history.append(tick)
         if len(ticks_history) > 200:
             ticks_history = ticks_history[-200:]
 
-        # Order book
-        bids = [[round(price - 0.01 * i, 2), random.randint(100, 1000)] for i in range(1, 11)]
-        asks = [[round(price + 0.01 * i, 2), random.randint(100, 1000)] for i in range(1, 11)]
-        order_book = {"bids": bids, "asks": asks, "midPrice": price, "spread": round(asks[0][0] - bids[0][0], 2)}
+        bids = [[round(best_bid - 0.01 * i, 2), random.randint(100, 1000)] for i in range(1, 11)]
+        asks = [[round(best_ask + 0.01 * i, 2), random.randint(100, 1000)] for i in range(1, 11)]
+        mid_price = round((best_bid + best_ask) / 2, 2)
+        spread = round(best_ask - best_bid, 2)
+        order_book = {"bids": bids, "asks": asks, "midPrice": mid_price, "spread": spread}
 
         payload = json.dumps({"ticks": ticks_history[-60:], "orderBook": order_book})
-        for ws in ACTIVE_CLIENTS:
-            try: asyncio.run_coroutine_threadsafe(ws.send_text(payload), asyncio.get_event_loop())
-            except: pass
+        if event_loop is not None:
+            for ws in ACTIVE_CLIENTS[:]:
+                try:
+                    asyncio.run_coroutine_threadsafe(ws.send_text(payload), event_loop)
+                except:
+                    if ws in ACTIVE_CLIENTS:
+                        ACTIVE_CLIENTS.remove(ws)
         time.sleep(0.5)
 
 
 @app.on_event("startup")
 async def startup():
+    global event_loop
+    event_loop = asyncio.get_running_loop()
     threading.Thread(target=simulate_market, daemon=True).start()
 
 

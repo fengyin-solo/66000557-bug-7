@@ -25,8 +25,22 @@ import GridControl from './components/GridControl.vue'
 import BacktestReport from './components/BacktestReport.vue'
 import { useTradingStore } from './store/trading'
 const store = useTradingStore()
-onMounted(() => store.connectWS())
-onUnmounted(() => store.disconnectWS())
+function handlePageShow(event: PageTransitionEvent) {
+  if (event.persisted && !store.wsConnected) store.connectWS()
+}
+function handleOnline() {
+  if (!store.wsConnected) store.connectWS()
+}
+onMounted(() => {
+  store.connectWS()
+  window.addEventListener('pageshow', handlePageShow)
+  window.addEventListener('online', handleOnline)
+})
+onUnmounted(() => {
+  store.disconnectWS()
+  window.removeEventListener('pageshow', handlePageShow)
+  window.removeEventListener('online', handleOnline)
+})
 </script>
 
 <style>
