@@ -11,7 +11,12 @@ export const useTradingStore = defineStore('trading', () => {
   const config = ref<GridConfig>({ lowerPrice: 95, upperPrice: 115, gridCount: 20, capitalPerGrid: 1000, initialCapital: 100000 })
 
   let ws: WebSocket | null = null
+  let reconnectTimer: ReturnType<typeof setTimeout> | null = null
+  let closedManually = false
+
   function connectWS() {
+    closedManually = false
+    if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) return
     ws = new WebSocket(`ws://${location.hostname}:8000/ws`)
     ws.onopen = () => { wsConnected.value = true }
     ws.onmessage = (e) => {
@@ -21,7 +26,12 @@ export const useTradingStore = defineStore('trading', () => {
         if (d.orderBook) orderBook.value = d.orderBook
       } catch {}
     }
-    ws.onclose = () => { wsConnected.value = false }
+    ws.onclose = () => {
+      wsConnected.value = false
+      ws = null
+      // 行情短暂中断后自动重连；恢复后用新快照统一重绘
+      if (!closedManually) reconnectTimer = setTimeout(connectWS, 1000)
+    }
   }
 
   async function runBacktest() {
@@ -30,7 +40,11 @@ export const useTradingStore = defineStore('trading', () => {
     finally { loading.value = false }
   }
 
-  function disconnectWS() { ws?.close(); ws = null; wsConnected.value = false }
+  function disconnectWS() {
+    closedManually = true
+    if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null }
+    ws?.close(); ws = null; wsConnected.value = false
+  }
 
   return { loading, ticks, orderBook, gridResult, wsConnected, config, connectWS, runBacktest, disconnectWS }
 })

@@ -9,8 +9,10 @@ app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], all
 
 ACTIVE_CLIENTS = []
 SIM_RUNNING = True
+LOOP = None
 current_price = 100.0
 ticks_history = []
+last_payload = None
 
 class GridConfig(BaseModel):
     lowerPrice: float = 95
@@ -21,7 +23,7 @@ class GridConfig(BaseModel):
 
 
 def simulate_market():
-    global current_price, ticks_history
+    global current_price, ticks_history, last_payload
     price = 100.0
     while SIM_RUNNING:
         drift = 0.005 * math.sin(time.time() * 0.05)
@@ -39,20 +41,39 @@ def simulate_market():
         if len(ticks_history) > 200:
             ticks_history = ticks_history[-200:]
 
-        # Order book
-        bids = [[round(price - 0.01 * i, 2), random.randint(100, 1000)] for i in range(1, 11)]
-        asks = [[round(price + 0.01 * i, 2), random.randint(100, 1000)] for i in range(1, 11)]
-        order_book = {"bids": bids, "asks": asks, "midPrice": price, "spread": round(asks[0][0] - bids[0][0], 2)}
+        # Order book —— 整份快照只构建一次：档位、中间价、价差全部同源。
+        # 价格用整数分（整数 tick 偏移）生成，避免浮点 round 产生重复价/错位档。
+        price_cents = round(price * 100)
+        bids = [[(price_cents - i) / 100, random.randint(100, 1000)] for i in range(1, 11)]
+        asks = [[(price_cents + i) / 100, random.randint(100, 1000)] for i in range(1, 11)]
+        best_bid, best_ask = bids[0][0], asks[0][0]
+        order_book = {
+            "bids": bids,
+            "asks": asks,
+            "midPrice": round((best_bid + best_ask) / 2, 2),
+            "spread": round(best_ask - best_bid, 2),
+        }
 
         payload = json.dumps({"ticks": ticks_history[-60:], "orderBook": order_book})
-        for ws in ACTIVE_CLIENTS:
-            try: asyncio.run_coroutine_threadsafe(ws.send_text(payload), asyncio.get_event_loop())
-            except: pass
+        last_payload = payload
+        # 模拟器运行在独立线程，必须复用启动时捕获的主事件循环向 WS 推送
+        if LOOP is not None:
+            dead = []
+            for client in ACTIVE_CLIENTS:
+                try:
+                    asyncio.run_coroutine_threadsafe(client.send_text(payload), LOOP)
+                except Exception:
+                    dead.append(client)
+            for client in dead:
+                if client in ACTIVE_CLIENTS:
+                    ACTIVE_CLIENTS.remove(client)
         time.sleep(0.5)
 
 
 @app.on_event("startup")
 async def startup():
+    global LOOP
+    LOOP = asyncio.get_running_loop()
     threading.Thread(target=simulate_market, daemon=True).start()
 
 
@@ -137,7 +158,17 @@ def run_backtest(config: GridConfig):
 async def ws_endpoint(ws: WebSocket):
     await ws.accept()
     ACTIVE_CLIENTS.append(ws)
+    # 中断后重连立即补发最新快照，避免客户端停留在上一帧
+    if last_payload is not None:
+        try:
+            await ws.send_text(last_payload)
+        except Exception:
+            if ws in ACTIVE_CLIENTS:
+                ACTIVE_CLIENTS.remove(ws)
+            return
     try:
-        while True: await ws.receive_text()
-    except: 
-        if ws in ACTIVE_CLIENTS: ACTIVE_CLIENTS.remove(ws)
+        while True:
+            await ws.receive_text()
+    except Exception:
+        if ws in ACTIVE_CLIENTS:
+            ACTIVE_CLIENTS.remove(ws)
